@@ -1,12 +1,12 @@
-import express, { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+const express = require('express');
+const { PrismaClient } = require('@prisma/client');
 
 const app = express();
 const prisma = new PrismaClient();
 
 app.use(express.json());
 
-app.post('/identify', async (req: Request, res: Response): Promise<any> => {
+app.post('/identify', async (req, res) => {
     try {
         const { email, phoneNumber } = req.body;
 
@@ -14,8 +14,7 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             return res.status(400).json({ error: 'At least one of email or phoneNumber is required' });
         }
 
-        // 1. Find all matching contacts
-        const orConditions: any[] = [];
+        const orConditions = [];
         if (email) orConditions.push({ email });
         if (phoneNumber) orConditions.push({ phoneNumber: String(phoneNumber) });
 
@@ -23,7 +22,6 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             where: { OR: orConditions }
         });
 
-        // Rule A (New Customer): If query returns absolutely no matching rows
         if (directMatches.length === 0) {
             const newContact = await prisma.contact.create({
                 data: {
@@ -42,12 +40,10 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             });
         }
 
-        // We have matches. Find all related "primary" IDs from these matches
         const primaryIdsToFetch = Array.from(new Set(
             directMatches.map(c => c.linkedId ? c.linkedId : c.id)
         ));
 
-        // Fetch all contacts in the cluster (the primaries and all their secondaries)
         const clusterContacts = await prisma.contact.findMany({
             where: {
                 OR: [
@@ -55,19 +51,16 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
                     { linkedId: { in: primaryIdsToFetch } }
                 ]
             },
-            orderBy: { createdAt: 'asc' } // oldest first
+            orderBy: { createdAt: 'asc' }
         });
 
-        // Identify the true primary (the oldest primary in the cluster)
         const allPrimariesInCluster = clusterContacts.filter(c => c.linkPrecedence === 'primary');
-        const truePrimary = allPrimariesInCluster[0] || clusterContacts[0]; // fallback if data is weird
+        const truePrimary = allPrimariesInCluster[0] || clusterContacts[0];
 
-        // Rule C: Merge other primaries into the true primary
         const otherPrimaries = allPrimariesInCluster.slice(1);
         if (otherPrimaries.length > 0) {
             const otherPrimaryIds = otherPrimaries.map(c => c.id);
 
-            // Turn other primaries into secondaries of truePrimary
             await prisma.contact.updateMany({
                 where: { id: { in: otherPrimaryIds } },
                 data: {
@@ -77,7 +70,6 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
                 }
             });
 
-            // Re-link any secondaries that belonged to the old primaries
             await prisma.contact.updateMany({
                 where: { linkedId: { in: otherPrimaryIds } },
                 data: {
@@ -86,7 +78,6 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
                 }
             });
 
-            // Update local memory representations to reflect db changes so we don't need to fetch again
             for (let c of clusterContacts) {
                 if (otherPrimaryIds.includes(c.id)) {
                     c.linkedId = truePrimary.id;
@@ -97,7 +88,6 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             }
         }
 
-        // Rule B: Check if there's new info that requires creating a new Secondary contact
         const clusterEmails = new Set(clusterContacts.map(c => c.email).filter(Boolean));
         const clusterPhones = new Set(clusterContacts.map(c => c.phoneNumber).filter(Boolean));
 
@@ -116,12 +106,9 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             clusterContacts.push(newSecondary);
         }
 
-        // Format and return Response
-        // Secondary contacts filter
         const secondaryContacts = clusterContacts.filter(c => c.id !== truePrimary.id);
 
-        // Emails array: true primary first, then others, unique
-        const emails: string[] = [];
+        const emails = [];
         if (truePrimary.email) emails.push(truePrimary.email);
         for (const c of secondaryContacts) {
             if (c.email && !emails.includes(c.email)) {
@@ -129,8 +116,7 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
             }
         }
 
-        // Phones array: true primary first, then others, unique
-        const phones: string[] = [];
+        const phones = [];
         if (truePrimary.phoneNumber) phones.push(truePrimary.phoneNumber);
         for (const c of secondaryContacts) {
             if (c.phoneNumber && !phones.includes(c.phoneNumber)) {
@@ -156,6 +142,4 @@ app.post('/identify', async (req: Request, res: Response): Promise<any> => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
